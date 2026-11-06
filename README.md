@@ -1,48 +1,59 @@
 # DevOps Test Task
 
-## Описание
-
-Тестовое задание по упаковке и запуску статической веб-страницы в Kubernetes. Контейнер основан на `nginx:stable`, а содержимое `index.html` копируется в стандартный каталог nginx.
-
-В Kubernetes-манифесте для контейнера настроены startup, liveness и readiness probes, а также запросы и пределы CPU и памяти.
+Статическая страница на nginx, собираемая в Docker-образ и запускаемая в Kubernetes.
 
 ## Состав проекта
 
-- `Dockerfile` — собирает образ nginx со статической страницей.
+- `Dockerfile` и `nginx.conf` — собирают и настраивают nginx на порту `8080`; процесс работает от UID/GID `101`.
 - `index.html` — содержимое веб-страницы.
-- `deployment.yaml` — Deployment с одной репликой nginx, probes и ресурсными ограничениями.
+- `deployment.yaml` — Deployment с двумя репликами, probes, ограничениями ресурсов, Service и PodDisruptionBudget.
+- `.gitlab-ci.yml` — проверяет конфигурацию образа, публикует его в GitLab Container Registry и деплоит из основной ветки при наличии `KUBE_CONFIG`.
 
-## Kubernetes
-
-Все probes выполняют HTTP GET-запрос к `/` на порту 80:
-
-- `startupProbe` проверяет запуск приложения; интервал 5 секунд и `failureThreshold: 12` дают nginx до 60 секунд на запуск.
-- `livenessProbe` перезапускает контейнер, если приложение перестало отвечать; интервал проверки — 10 секунд.
-- `readinessProbe` исключает pod из обслуживания, пока он не готов принимать запросы; интервал проверки — 5 секунд.
-
-Для контейнера заданы следующие ресурсы:
-
-| Тип | CPU | Память |
-| --- | --- | --- |
-| Запрос (`requests`) | `100m` | `64Mi` |
-| Предел (`limits`) | `500m` | `128Mi` |
-
-Применить манифест и проверить состояние Deployment:
+## Локальный запуск
 
 ```sh
-kubectl apply -f deployment.yaml
-kubectl get deployments,pods
+docker build -t static-web:local .
+docker run --rm -p 8080:8080 static-web:local
+curl http://localhost:8080
 ```
 
-## Работа с GitLab
+## GitLab CI/CD
 
-GitLab используется для хранения исходного кода и совместной работы над изменениями. Типичный порядок работы:
+Runner с тегом `shell-runner` должен иметь Docker CLI с доступом к Docker daemon и `kubectl`. В настройках проекта должен быть включён Container Registry.
 
-1. Создать рабочую ветку от актуальной основной ветки.
-2. Внести изменения и отправить ветку в GitLab.
-3. Создать Merge Request и проверить изменения перед слиянием.
+Pipeline собирает образ с тегом commit SHA, проверяет конфигурацию командой `nginx -t` и отправляет образ в GitLab Container Registry. Deploy выполняется только для основной ветки, если задана защищённая переменная `KUBE_CONFIG` типа **File** с kubeconfig, имеющим права на обновление ресурсов в нужном namespace.
 
-В текущем проекте нет `.gitlab-ci.yml`, поэтому автоматический CI/CD pipeline не настроен. Для запуска проверок или публикации образа потребуется добавить GitLab CI-конфигурацию.
+Перед деплоем создайте в целевом namespace secret `gitlab-registry`, чтобы кластер мог скачать приватный образ. Используйте GitLab Deploy Token с правом `read_registry`; не сохраняйте пароль в репозитории:
+
+```sh
+REGISTRY_HOST=registry.gitlab.com
+kubectl create secret docker-registry gitlab-registry \
+	--docker-server="$REGISTRY_HOST" \
+	--docker-username="$REGISTRY_USER" \
+	--docker-password="$REGISTRY_PASSWORD"
+```
+
+Для self-managed GitLab укажите в `REGISTRY_HOST` хост вашего Container Registry.
+
+Манифест можно применить вручную, заменив базовый образ на опубликованный образ проекта:
+
+```sh
+IMAGE=registry.gitlab.com/<group>/<project>:<tag>
+sed "s|image: nginx:stable|image: $IMAGE|" deployment.yaml | kubectl apply -f -
+kubectl rollout status deployment/nginx-deployment
+```
+
+Service типа `ClusterIP` доступен внутри кластера по адресу `nginx-service:80`. Для внешнего доступа добавьте Ingress с TLS и настройками своего ingress-контроллера.
+
+Проверка и диагностика:
+
+```sh
+kubectl get deployments,pods,services,pdb
+kubectl get endpoints nginx-service
+kubectl describe pods -l app=nginx
+kubectl logs deployment/nginx-deployment
+kubectl get events --sort-by=.metadata.creationTimestamp
+```
 
 ## Справочник по Linux и сетевой диагностике
 

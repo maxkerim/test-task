@@ -1,10 +1,28 @@
 stages:
   - test
+  - deploy
 
-test_nginx:
+test_and_publish_image:
   stage: test
   script:
-    - echo "Проверка наличия nginx..."
-    - which nginx && nginx -v
+    - docker build --pull -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA" .
+    - docker run --rm --entrypoint nginx "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA" -t
+    - echo "$CI_REGISTRY_PASSWORD" | docker login "$CI_REGISTRY" -u "$CI_REGISTRY_USER" --password-stdin
+    - docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA"
+  tags:
+    - shell-runner
+
+deploy:
+  stage: deploy
+  needs:
+    - test_and_publish_image
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $KUBE_CONFIG'
+  script:
+    - export KUBECONFIG="$KUBE_CONFIG"
+    - >-
+      sed "s|image: nginx:stable|image: ${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHA}|" deployment.yaml |
+      kubectl apply -f -
+    - kubectl rollout status deployment/nginx-deployment --timeout=120s
   tags:
     - shell-runner
